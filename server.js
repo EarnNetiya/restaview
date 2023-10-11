@@ -7,21 +7,26 @@ const argon2 = require('argon2');
 const JWT_SECRET = 'your-secret-key';
 const jwt = require('jsonwebtoken');
 
-function verifyToken(req, res, next) {
-    const token = req.headers.authorization;
-  
-    if (!token) {
-      return res.status(401).json({ message: 'Authentication failed: No token provided' });
-    }
-  
-    jwt.verify(token, JWT_SECRET, (err, decoded) => {
-      if (err) {
-        return res.status(401).json({ message: 'Authentication failed: Invalid token' });
-      }
-      req.userId = decoded.userId; 
-      next();
-    });
-  }
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization']
+  const token = authHeader && authHeader.split(' ')[1]
+
+  if (token == null) return res.sendStatus(401)
+
+  jwt.verify(token, JWT_SECRET, (err, user) => {
+    console.log(err)
+
+    if (err) return res.sendStatus(403)
+    req.user = user
+
+    return next()
+  })
+}
+
+function isValidEmail(email) {
+  const emailPattern = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,4}$/;
+  return emailPattern.test(email);
+}
   
 
 const client = new Client({
@@ -48,7 +53,14 @@ app.get('/', (_,res) => {
     
 });
 
-app.get('/:id', (req,res) => {
+app.get('/reviews', async (req,res) => {
+  const text = 'SELECT * FROM reviews ORDER BY updated_at ASC'
+  const response = await client.query(text)
+  
+  return res.json(response.rows)
+});
+
+app.get('/:id', async (req,res) => {
     const params = req.params;
     client.query(`SELECT * FROM restaurants WHERE id = $1`, [params.id]).then((result) => {
         for (let i of result.rows) {
@@ -56,37 +68,54 @@ app.get('/:id', (req,res) => {
         }
     
     })
-})
+    const restaurants = await client.query(`SELECT * FROM restaurants WHERE id = $1`, [params.id]);
+    if (restaurants.rowCount === 0) {
+      return res.json({ message: "ไม่พบไอดีดังกล่าว" })
+  }
+});
+
+app.get('/user/me', authenticateToken, async (req, res) => {
+  const text = 'SELECT * FROM users WHERE id = $1';
+  const values = [req.user.userId];
+  const response = await client.query(text, values)
+
+  return res.json(response.rows[0])
+});
+
+app.get('/reviews/me', authenticateToken, async (req, res) => {
+  const text = 'SELECT * FROM reviews WHERE user_id = $1';
+  const values = [req.user.userId];
+  const response = await client.query(text, values)
+
+  return res.json(response.rows[0])
+});
+
 app.post('/', (req,res) => {
-    const text = 'INSERT INTO restaurants(name, phone_number, location) VALUES($1, $2, $3)'
-    const body = req.body;
-    const values = [body.name, body.phone_number, body.location]
-    const response = client.query(text, values)
-    
-    res.json(response.rows)
+  const text = 'INSERT INTO restaurants(name, phone_number, location) VALUES($1, $2, $3)'
+  const body = req.body;
+  const values = [body.name, body.phone_number, body.location]
+  const response = client.query(text, values)
+  if (body.phone_number.length !== 10) {
+    return res.status(400).json({ error: "เบอร์โทรศัพท์ต้องมี 10 หลัก" });
+  }
+
+  res.json(response.rows)
 })
 
-app.put('/:id', (req,res) => {
+app.put('/:id', async (req,res) => {
     const params = req.params;
     const body = req.body;
     const text = 'UPDATE restaurants SET name = $1, phone_number = $2, location = $3 WHERE id = $4 '
     const values = [body.name, body.phone_number, body.location, params.id]
-
+    
+    const restaurants = await client.query(text, values);
+    if (restaurants.rowCount === 0) {
+      return res.json({ message: "ไม่พบไอดีร้านอาหารดังกล่าว" })
+  }
     const response = client.query(text, values)
     
     res.json(response.rows)
-})
-
-app.delete('/:id', (req,res) => {
-    const params = req.params;
-    const text = 'DELETE FROM restaurants WHERE id = $1 '
-    const values = [params.id]
-
-    const response = client.query(text, values)
-    
-    res.json(response.rows)
-
-})
+});
 
 
 app.post('/user', async (req,res) => {
@@ -102,18 +131,17 @@ app.post('/user', async (req,res) => {
     const values = [body.email_address, body.firstname, body.lastname, hash]
     const response = client.query(text, values)
     
-   
-
+    if (!isValidEmail(body.email_address)) {
+      return res.status(400).json({ error: "อีเมลไม่ถูกต้อง" });
+    }
     if (body.password.length < 8) {
-        res.json({ password: "error"})
+        res.json({ password: "รหัสผ่านห้ามน้อยกว่า 8 ตัว"})
     }
 
-    res.json(response.rows)
+    return res.json(response.rows)
 });
 
-app.get('/get', verifyToken ,(req,res) => {
-    res.json({ message: "asas" })
-});
+
 
 app.post('/login', async (req, res) => {
     const { email_address, password } = req.body;
@@ -126,22 +154,50 @@ app.post('/login', async (req, res) => {
         if (await argon2.verify(hashedPassword, password)) {
            
             const token = jwt.sign({ userId: result.rows[0].id }, JWT_SECRET, { expiresIn: '1h' });
-            res.json({ token });
+            return res.json({ token });
           } else {
-            res.status(401).json('Password incorrect');
+            return res.status(401).json('Password incorrect');
           }
         } else {
-          res.status(404).json('User not found');
+          return res.status(404).json('User not found');
         }
       } catch (err) {
         console.error(err);
-        res.status(500).json('Internal server error');
+        return res.status(500).json('Internal server error');
       }
   });
+
+
+app.get('/reviews/:id', async (req,res) => {
+    const params = req.params;
+    const text = 'SELECT * FROM reviews WHERE user_id = $1'
+    const values = [params.id]
+
+    const response = await client.query(text, values);
+    if (response.rowCount === 0) {
+      return res.json({ message: "ไม่พบรีวิวสำหรับผู้ใช้รายนี้" })
+  }
+    
+    res.json(response.rows)
+});
+
+app.post('/reviews', authenticateToken, async (req,res) => {
+  const body = req.body;
+
+  const restaurants = await client.query(`SELECT * FROM restaurants WHERE id = $1`, [body.restaurant_id]);
+  if (restaurants.rowCount === 0) {
+    return res.json({ message: "ไม่พบไอดีร้านอาหารดังกล่าว" })
+  }
+
+  const text = 'INSERT INTO reviews(user_id, restaurant_id, review_text) VALUES($1, $2, $3)'
+  const values = [req.user.userId, body.restaurant_id, body.review_text]
+  const response = client.query(text, values)
+  
+  res.json(response.rows)
+});
 
 const port = process.env.NP || 3000;
 app.listen(port, ()=> {
     console.log(`listen port ${port}...`)
 });
 
-// dsawdshgas8 9cy8sap9
