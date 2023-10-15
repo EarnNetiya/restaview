@@ -27,17 +27,6 @@ function isValidEmail(email) {
   const emailPattern = /^[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,4}$/;
   return emailPattern.test(email);
 }
-  
-
-const client = new Client({
-    host: 'node50593-yongyuth.proen.app.ruk-com.cloud',
-    port: 11632,
-    database: 'postgres',
-    user: 'webadmin',
-    password: 'lZTusDwkU3',
-})
-
-client.connect()
 
 
 app.use(express.json());
